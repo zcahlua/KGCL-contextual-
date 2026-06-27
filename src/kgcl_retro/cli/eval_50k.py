@@ -9,7 +9,7 @@ import torch  # Explanation: imports torch for evaluate USPTO-50K exact-match an
 from rdkit import Chem, RDLogger  # Explanation: imports selected names needed to evaluate USPTO-50K exact-match and MaxFrag accuracy
 
 from kgcl_retro.models import KGCL, BeamSearch  # Explanation: imports packaged model and beam-search classes for evaluation.
-from kgcl_retro.cli.fg_options import add_fg_arguments, fg_config_from_args
+from kgcl_retro.cli.fg_options import add_fg_arguments, resolve_eval_fg_config
 from kgcl_retro.paths import resolve_project_paths  # Explanation: imports shared project-root path resolution for package CLIs.
 
 import sys  # Explanation: imports sys for evaluate USPTO-50K exact-match and MaxFrag accuracy
@@ -84,6 +84,8 @@ def main():  # Explanation: defines main, which runs this script from command-li
                         help='maximum number of edit steps')  # Explanation: assigns an intermediate value used by later computation
     parser.add_argument('--root_dir', type=str, default=DEFAULT_ROOT_DIR,  # Explanation: selects the root directory containing data and experiments.
                         help='Repository/data root containing data/ and experiments/')  # Explanation: documents the package-relative root directory option.
+    parser.add_argument("--allow_architecture_override", action="store_true",
+                        help="Allow eval CLI architecture flags to override checkpoint architecture. Unsafe unless intentional.")
     add_fg_arguments(parser, default_mode=None)
 
     args = parser.parse_args()  # Explanation: parses command-line options
@@ -104,8 +106,7 @@ def main():  # Explanation: defines main, which runs this script from command-li
 
     checkpoint = torch.load(os.path.join(exp_dir, checkpoint))  # Explanation: loads saved tensor batches or checkpoints
     config = checkpoint['saveables']  # Explanation: assigns an intermediate value used by later computation
-    if args.fg_mode is not None:
-        config['config'].update({key: value for key, value in fg_config_from_args(vars(args)).items() if value is not None})
+    config['config'] = resolve_eval_fg_config(config['config'], args)
 
     model = KGCL(**config, device=DEVICE)  # Explanation: assigns an intermediate value used by later computation
     model.load_state_dict(checkpoint['state'])  # Explanation: executes this statement as part of evaluate USPTO-50K exact-match and MaxFrag accuracy

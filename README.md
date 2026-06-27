@@ -51,10 +51,14 @@ Contextual mode requires regenerated prepared data because the saved tensor batc
 ```bash
 kgcl-prepare-data --dataset uspto_50k --mode train --fg_mode contextual --fg_context_radius 1
 kgcl-train --dataset uspto_50k --fg_mode contextual --fg_context_radius 1
-kgcl-eval-50k --dataset uspto_50k --fg_mode contextual --fg_context_radius 1
+kgcl-eval-50k --dataset uspto_50k
 ```
 
-Non-legacy prepared batches are stored under mode-specific subdirectories such as `contextual_fg_r1/`, and `fg_metadata.json` is checked during training to avoid mixing legacy and contextual tensors. This implementation only adds the Contextual Functional-Group KGCL stage; sparse 2-FWL or candidate-pair reasoning is intentionally not implemented in this task.
+Non-legacy prepared batches are stored under mode-specific subdirectories such as `contextual_fg_r1/`, and `fg_metadata.json` is checked during training to avoid mixing legacy and contextual tensors. Evaluation uses the FG architecture saved in the checkpoint. Passing `--fg_mode` during eval is treated as a compatibility assertion; use `--allow_architecture_override` only for intentional checkpoint architecture overrides.
+
+`atom_message=True` is not implemented in this refactor; the encoder path is directed-bond-message D-MPNN. `--fg_freeze_kg_projection` freezes only the KG projection layer inside contextual KG/context fusion, and `--fg_freeze_kg_embeddings` is a deprecated alias for that setting. KG asset vectors are fixed input features in the current design.
+
+This implementation only adds the Contextual Functional-Group KGCL stage; sparse 2-FWL or candidate-pair reasoning is intentionally not implemented in this task.
 
 ## Data
 The original datasets used in this paper are from:

@@ -1,4 +1,5 @@
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 
@@ -65,3 +66,40 @@ def test_eval_freeze_alias_is_normalized():
     )
 
     assert resolved["fg_freeze_kg_projection"] is True
+
+
+@pytest.mark.parametrize("script", ["eval_50k.py", "eval_full.py", "eval_roundtrip.py"])
+def test_eval_scripts_use_strict_config_helper(script):
+    source = Path("src/kgcl_retro/cli", script).read_text()
+
+    assert "resolve_eval_fg_config" in source
+    assert "fg_config_from_args" not in source
+    assert "allow_architecture_override" in source
+    assert "config['config'] = resolve_eval_fg_config(config['config'], args)" in source
+
+
+@pytest.mark.parametrize(
+    ("key", "checkpoint_value", "cli_value"),
+    [
+        ("use_rxn_class", False, True),
+        ("atom_message", False, True),
+        ("mpn_size", 256, 128),
+        ("depth", 10, 8),
+        ("n_atom_feat", 85, 95),
+        ("n_bond_feat", 97, 107),
+    ],
+)
+def test_eval_rejects_broader_architecture_mismatches(key, checkpoint_value, cli_value):
+    checkpoint_config = {"fg_mode": "contextual", key: checkpoint_value}
+
+    with pytest.raises(ValueError, match=key):
+        resolve_eval_fg_config(checkpoint_config, _args(**{key: cli_value}))
+
+
+def test_eval_allows_matching_broader_architecture_key():
+    resolved = resolve_eval_fg_config(
+        {"fg_mode": "contextual", "mpn_size": 256},
+        _args(mpn_size=256),
+    )
+
+    assert resolved["mpn_size"] == 256
