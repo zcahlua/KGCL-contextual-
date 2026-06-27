@@ -47,10 +47,14 @@ Functional-group overlaps are allowed. The matcher deduplicates automorphic dupl
 ```bash
 kgcl-prepare-data --dataset uspto_50k --mode train --fg_mode contextual --fg_context_radius 1
 kgcl-train --dataset uspto_50k --fg_mode contextual --fg_context_radius 1
-kgcl-eval-50k --dataset uspto_50k --fg_mode contextual --fg_context_radius 1
+kgcl-eval-50k --dataset uspto_50k
 ```
 
 Prepared contextual tensors are not interchangeable with legacy tensors. Contextual and none-mode batches are written into separate subdirectories and include `fg_metadata.json` so training can assert that the model mode matches the prepared data.
+
+Evaluation uses the FG architecture saved in the checkpoint. Passing `--fg_mode` during eval is treated as a compatibility assertion; use `--allow_architecture_override` only for intentional checkpoint architecture overrides.
+
+`atom_message=True` is not implemented in this refactor; the encoder path is directed-bond-message D-MPNN. `--fg_freeze_kg_projection` freezes only the KG projection layer inside contextual KG/context fusion, and `--fg_freeze_kg_embeddings` is a deprecated alias for that setting. KG asset vectors are fixed input features in the current design.
 
 ## Scope
 

@@ -24,7 +24,28 @@ FG_CONFIG_KEYS = (
     "fg_debug",
 )
 
-ARCHITECTURE_FG_KEYS = tuple(key for key in FG_CONFIG_KEYS if key != "fg_debug")
+ARCHITECTURE_FG_KEYS = tuple(key for key in FG_CONFIG_KEYS if key not in {"fg_debug", "fg_freeze_kg_embeddings"})
+ARCHITECTURE_KEYS = (
+    "fg_mode",
+    "fg_context_radius",
+    "fg_hidden_size",
+    "fg_layers",
+    "fg_dropout",
+    "fg_attn_dim",
+    "fg_max_dist",
+    "fg_max_matches_per_pattern",
+    "fg_use_kg_fusion",
+    "fg_use_membership_bias",
+    "fg_use_distance_bias",
+    "fg_null_token",
+    "fg_freeze_kg_projection",
+    "use_rxn_class",
+    "atom_message",
+    "n_atom_feat",
+    "n_bond_feat",
+    "mpn_size",
+    "depth",
+)
 _PREPARED_DATA_KEYS = (
     "fg_mode",
     "fg_context_radius",
@@ -89,6 +110,8 @@ def _fill_checkpoint_comparison_defaults(config: dict[str, Any]) -> dict[str, An
     filled.setdefault("fg_null_token", True)
     filled.setdefault("fg_freeze_kg_projection", False)
     filled.setdefault("fg_freeze_kg_embeddings", filled["fg_freeze_kg_projection"])
+    filled.setdefault("use_rxn_class", False)
+    filled.setdefault("atom_message", False)
     if filled.get("fg_hidden_size") is None and filled.get("mpn_size") is not None:
         filled["fg_hidden_size"] = filled["mpn_size"]
     if filled.get("fg_attn_dim") is None and filled.get("mpn_size") is not None:
@@ -205,12 +228,15 @@ def resolve_eval_fg_config(checkpoint_config: dict[str, Any], args: Any) -> dict
     args_dict = _as_dict(args)
     cli_config = {key: args_dict.get(key) for key in FG_CONFIG_KEYS if args_dict.get(key) is not None}
     cli_config = normalize_fg_config_values(cli_config)
+    for key in ARCHITECTURE_KEYS:
+        if key not in FG_CONFIG_KEYS and args_dict.get(key) is not None:
+            cli_config[key] = args_dict[key]
     allow_override = bool(args_dict.get("allow_architecture_override", False))
 
     for key, value in cli_config.items():
         if key == "fg_freeze_kg_embeddings":
             continue
-        if key not in ARCHITECTURE_FG_KEYS:
+        if key not in ARCHITECTURE_KEYS:
             resolved[key] = value
             continue
         checkpoint_value = resolved.get(key)
