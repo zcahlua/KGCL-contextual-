@@ -17,15 +17,22 @@ class MPNEncoder(nn.Module):  # Explanation: defines MPNEncoder, directed messag
         bond_fdim: Bond feature vector dimension.
         hidden_size: Hidden layers dimension
         depth: Number of message passing steps
-        droupout: the droupout rate
+        dropout: dropout rate
+        atom_message: Kept for API compatibility. Only directed-bond-message
+            D-MPNN mode is implemented; atom_message=True is rejected.
        """
         super(MPNEncoder, self).__init__()  # Explanation: executes this statement as part of encode molecular graphs with D-MPNN and optional attention
+        if atom_message:
+            raise ValueError(
+                "atom_message=True is not implemented in KGCL-contextual. "
+                "Use atom_message=False. The current encoder is directed-bond-message D-MPNN."
+            )
         self.atom_fdim = atom_fdim  # Explanation: stores this value on the object for later model operations
         self.bond_fdim = bond_fdim  # Explanation: stores this value on the object for later model operations
         self.hidden_size = hidden_size  # Explanation: stores this value on the object for later model operations
         self.depth = depth  # Explanation: stores this value on the object for later model operations
         self.dropout = dropout  # Explanation: stores this value on the object for later model operations
-        # self.atom_message = atom_message
+        self.atom_message = atom_message
 
         # Input
         # input_dim = self.atom_fdim if self.atom_message else self.bond_fdim

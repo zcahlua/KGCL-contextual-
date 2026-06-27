@@ -50,6 +50,7 @@ class ContextualFGGraphEncoder(nn.Module):
             ]
         )
         self.layer_norms = nn.ModuleList([nn.LayerNorm(hidden_size) for _ in range(layers)])
+        self.core_null = nn.Parameter(torch.zeros(hidden_size))
         self.boundary_null = nn.Parameter(torch.zeros(hidden_size))
         self.output_mlp = nn.Sequential(
             nn.Linear((2 * hidden_size) + aux_dim, hidden_size),
@@ -113,15 +114,16 @@ class ContextualFGGraphEncoder(nn.Module):
             fg_states = states[node_start: node_start + node_count]
             fg_core = graph_tensors.fg_node_core_mask[node_start: node_start + node_count]
             if fg_states.numel() == 0:
-                core_vec = torch.zeros(self.hidden_size, device=device)
+                core_vec = self.core_null
                 boundary_vec = self.boundary_null
                 type_id = torch.tensor(0, device=device, dtype=torch.long)
             else:
-                core_vec = fg_states[fg_core].mean(dim=0)
+                core_vec = fg_states[fg_core].mean(dim=0) if fg_core.any() else self.core_null
                 boundary_states = fg_states[~fg_core]
                 boundary_vec = boundary_states.mean(dim=0) if boundary_states.numel() else self.boundary_null
                 type_id = graph_tensors.fg_node_fg_type[node_start]
-            type_vec = self.type_embedding(type_id.clamp(max=self.type_embedding.num_embeddings - 1))
+            type_id = type_id.clamp(min=0, max=self.type_embedding.num_embeddings - 1)
+            type_vec = self.type_embedding(type_id)
             pooled.append(self.output_mlp(torch.cat([core_vec, boundary_vec, type_vec], dim=-1)))
         return torch.stack(pooled, dim=0)
 
@@ -134,14 +136,24 @@ class KGContextFusion(nn.Module):
         chem_descriptor_dim: int,
         out_dim: int,
         use_kg_fusion: bool = True,
-        freeze_kg_embeddings: bool = False,
+        freeze_kg_projection: bool | None = None,
+        freeze_kg_embeddings: bool | None = None,
     ) -> None:
         super().__init__()
+        if freeze_kg_embeddings is not None:
+            if freeze_kg_projection is not None and bool(freeze_kg_projection) != bool(freeze_kg_embeddings):
+                raise ValueError(
+                    "Conflicting KG fusion freeze flags: freeze_kg_projection and deprecated "
+                    "freeze_kg_embeddings differ."
+                )
+            freeze_kg_projection = bool(freeze_kg_embeddings)
+        if freeze_kg_projection is None:
+            freeze_kg_projection = False
         self.use_kg_fusion = use_kg_fusion
         self.kg_proj = nn.Linear(kg_dim, out_dim)
         self.ctx_proj = nn.Linear(ctx_dim, out_dim)
         self.gate = nn.Linear(kg_dim + ctx_dim + chem_descriptor_dim, out_dim)
-        if freeze_kg_embeddings:
+        if freeze_kg_projection:
             for param in self.kg_proj.parameters():
                 param.requires_grad = False
 
@@ -193,12 +205,14 @@ class AtomFGAttention(nn.Module):
         self.delta_null = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, atom_features: torch.Tensor, fg_embeddings: torch.Tensor, graph_tensors, atom_scope):
-        enhanced = atom_features.clone()
-        fg_context = atom_features.new_zeros((atom_features.size(0), self.attn_dim))
+        enhanced_chunks = [atom_features.new_zeros((1, self.atom_fdim))]
+        context_chunks = [atom_features.new_zeros((1, self.attn_dim))]
         attention_weights = []
         device = atom_features.device
+        cursor = 1
 
         for mol_idx, (atom_start, atom_count) in enumerate(atom_scope):
+            assert atom_start == cursor
             atoms = atom_features[atom_start: atom_start + atom_count]
             fg_start, fg_count = graph_tensors.fg_scope[mol_idx]
             real_fgs = fg_embeddings[fg_start: fg_start + fg_count]
@@ -206,9 +220,17 @@ class AtomFGAttention(nn.Module):
             groups = real_fgs
             if include_null:
                 groups = torch.cat([groups, self.null_token.view(1, -1)], dim=0)
+            if atom_count == 0:
+                enhanced_chunks.append(atom_features.new_zeros((0, self.atom_fdim)))
+                context_chunks.append(atom_features.new_zeros((0, self.attn_dim)))
+                attention_weights.append(atoms.new_zeros((0, groups.size(0))))
+                cursor += atom_count
+                continue
             if groups.size(0) == 0:
-                enhanced[atom_start: atom_start + atom_count] = atoms
+                enhanced_chunks.append(atoms)
+                context_chunks.append(atom_features.new_zeros((atom_count, self.attn_dim)))
                 attention_weights.append(atoms.new_zeros((atom_count, 0)))
+                cursor += atom_count
                 continue
 
             scores = self.query(atoms).matmul(self.key(groups).t()) / math.sqrt(self.attn_dim)
@@ -239,22 +261,38 @@ class AtomFGAttention(nn.Module):
                 )
 
             if self.use_membership_bias:
-                membership_bias = torch.where(membership, self.beta_in, self.beta_out)
+                real_width = membership.size(1) - (1 if include_null else 0)
+                real_membership = membership[:, :real_width]
+                membership_parts = []
+                if real_width:
+                    membership_parts.append(torch.where(real_membership, self.beta_in, self.beta_out))
                 if include_null:
-                    membership_bias[:, -1] = self.beta_null
+                    membership_parts.append(self.beta_null.expand(atom_count, 1))
+                membership_bias = torch.cat(membership_parts, dim=1) if membership_parts else scores.new_zeros(scores.shape)
                 scores = scores + membership_bias
             if self.use_distance_bias:
-                dist_bias = self.distance_bias(dist).squeeze(-1)
+                real_width = dist.size(1) - (1 if include_null else 0)
+                dist_parts = []
+                if real_width:
+                    dist_parts.append(self.distance_bias(dist[:, :real_width]).squeeze(-1))
                 if include_null:
-                    dist_bias[:, -1] = self.delta_null
+                    dist_parts.append(self.delta_null.expand(atom_count, 1))
+                dist_bias = torch.cat(dist_parts, dim=1) if dist_parts else scores.new_zeros(scores.shape)
                 scores = scores + dist_bias
 
             weights = torch.softmax(scores, dim=-1)
             context = weights.matmul(self.value(groups))
-            enhanced[atom_start: atom_start + atom_count] = self.layer_norm(atoms + self.output(context))
-            fg_context[atom_start: atom_start + atom_count] = context
+            enhanced_chunks.append(self.layer_norm(atoms + self.output(context)))
+            context_chunks.append(context)
             attention_weights.append(weights)
+            cursor += atom_count
 
-        enhanced[0] = 0
-        fg_context[0] = 0
+        assert cursor == atom_features.size(0)
+        enhanced = torch.cat(enhanced_chunks, dim=0)
+        fg_context = torch.cat(context_chunks, dim=0)
+        assert enhanced.size() == atom_features.size()
+        assert fg_context.size(0) == atom_features.size(0)
+        assert fg_context.size(1) == self.attn_dim
+        assert enhanced[0].abs().sum() == 0
+        assert fg_context[0].abs().sum() == 0
         return enhanced, fg_context, attention_weights

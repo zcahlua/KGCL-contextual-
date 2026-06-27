@@ -17,6 +17,7 @@ from kgcl_retro.models.utils import (creat_edits_feats, index_select_ND,  # Expl
 
 
 def add_fg_config_defaults(config: Dict) -> Dict:
+    original_config = dict(config)
     config = dict(config)
     config.setdefault("fg_mode", "legacy")
     if config["fg_mode"] == "contextual_fg":
@@ -40,10 +41,32 @@ def add_fg_config_defaults(config: Dict) -> Dict:
     config.setdefault("fg_use_membership_bias", True)
     config.setdefault("fg_use_distance_bias", True)
     config.setdefault("fg_null_token", True)
-    config.setdefault("fg_freeze_kg_embeddings", False)
+    projection_present = original_config.get("fg_freeze_kg_projection") is not None
+    embeddings_present = original_config.get("fg_freeze_kg_embeddings") is not None
+    if projection_present and embeddings_present:
+        if bool(original_config["fg_freeze_kg_projection"]) != bool(original_config["fg_freeze_kg_embeddings"]):
+            raise ValueError(
+                "Conflicting FG freeze flags: fg_freeze_kg_projection and deprecated "
+                "fg_freeze_kg_embeddings differ."
+            )
+    if projection_present:
+        config["fg_freeze_kg_projection"] = bool(original_config["fg_freeze_kg_projection"])
+    elif embeddings_present:
+        config["fg_freeze_kg_projection"] = bool(original_config["fg_freeze_kg_embeddings"])
+    else:
+        config["fg_freeze_kg_projection"] = False
+    config["fg_freeze_kg_embeddings"] = config["fg_freeze_kg_projection"]
     config.setdefault("fg_debug", False)
     config.setdefault("use_rxn_class", False)
     return config
+
+
+def validate_model_config(config: Dict) -> None:
+    if config.get("atom_message", False):
+        raise ValueError(
+            "atom_message=True is not implemented in KGCL-contextual. "
+            "Use atom_message=False. The current encoder is directed-bond-message D-MPNN."
+        )
 
 
 class KGCL(nn.Module):  # Explanation: defines KGCL, main KGCL neural network for graph-edit retrosynthesis
@@ -63,6 +86,7 @@ class KGCL(nn.Module):  # Explanation: defines KGCL, main KGCL neural network fo
         super(KGCL, self).__init__()  # Explanation: executes this statement as part of define the KGCL graph-edit prediction model
 
         self.config = add_fg_config_defaults(config)  # Explanation: stores this value on the object for later model operations
+        validate_model_config(self.config)
         self.atom_vocab = atom_vocab  # Explanation: stores this value on the object for later model operations
         self.bond_vocab = bond_vocab  # Explanation: stores this value on the object for later model operations
         self.atom_outdim = len(atom_vocab)  # Explanation: stores this value on the object for later model operations
@@ -96,9 +120,15 @@ class KGCL(nn.Module):  # Explanation: defines KGCL, main KGCL neural network fo
         if self.fg_mode == "contextual":
             embedding_set = "KGembedding_2" if config.get("use_rxn_class", False) else "KGembedding"
             fg_type_count, kg_dim, _names = get_functional_group_asset_metadata(embedding_set)
+            bond_attr_fdim = config.get("n_bond_attr_feat", config["n_bond_feat"] - config["n_atom_feat"])
+            if bond_attr_fdim <= 0:
+                raise ValueError(
+                    "Contextual FG requires a positive raw bond-attribute dimension. "
+                    "Check n_bond_feat, n_atom_feat, and atom_message=False."
+                )
             self.contextual_fg_encoder = ContextualFGGraphEncoder(
                 atom_fdim=config["n_atom_feat"],
-                bond_fdim=config["n_bond_feat"] - config["n_atom_feat"],
+                bond_fdim=bond_attr_fdim,
                 hidden_size=config["fg_hidden_size"],
                 fg_type_vocab_size=fg_type_count,
                 fg_max_dist=config["fg_max_dist"],
@@ -111,7 +141,7 @@ class KGCL(nn.Module):  # Explanation: defines KGCL, main KGCL neural network fo
                 chem_descriptor_dim=FG_CHEM_DESCRIPTOR_SIZE,
                 out_dim=config["fg_hidden_size"],
                 use_kg_fusion=config["fg_use_kg_fusion"],
-                freeze_kg_embeddings=config["fg_freeze_kg_embeddings"],
+                freeze_kg_projection=config["fg_freeze_kg_projection"],
             )
             self.atom_fg_attention = AtomFGAttention(
                 atom_fdim=config["n_atom_feat"],
@@ -184,6 +214,11 @@ class KGCL(nn.Module):  # Explanation: defines KGCL, main KGCL neural network fo
                 n_atoms, self.config['mpn_size'], device=self.device)  # Explanation: assigns an intermediate value used by later computation
 
         if self.config["fg_mode"] == "contextual":
+            if not hasattr(prod_tensors, "has_contextual_fg"):
+                raise ValueError(
+                    "Contextual FG mode requires contextual prepared graph tensors. "
+                    "Regenerate data with kgcl-prepare-data --fg_mode contextual."
+                )
             contextual_embeddings = self.contextual_fg_encoder(prod_tensors)
             fg_embeddings = self.kg_context_fusion(
                 prod_tensors.fg_kg_embeddings,
