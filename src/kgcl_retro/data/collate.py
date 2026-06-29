@@ -6,6 +6,7 @@ from kgcl_retro.chemistry.features import ATOM_FDIM, BOND_FDIM  # Explanation: i
 from kgcl_retro.chemistry.fg_instances import FG_CHEM_DESCRIPTOR_SIZE
 from kgcl_retro.chemistry.functional_groups import get_functional_group_asset_metadata
 from kgcl_retro.chemistry.graphs import MolGraph  # Explanation: imports the packaged molecule graph class used by collate functions.
+from kgcl_retro.profiling import elapsed_ms, log as profile_log, start as profile_start
 
 
 @dataclass
@@ -83,6 +84,7 @@ def prepare_edit_labels(graph_batch: List[MolGraph], edits: List[Any], edit_atom
     """ 
     Prepare edit label including atom edits and bond edits.
     """
+    profile_timer = profile_start("KGCL_PROFILE_GRAPH_BUILD")
     bond_vocab_size = bond_vocab.size()  # Explanation: computes an intermediate value for molecular graph editing
     atom_vocab_size = atom_vocab.size()  # Explanation: computes an intermediate value for molecular graph editing
     edit_labels = []  # Explanation: computes an intermediate value for molecular graph editing
@@ -113,6 +115,12 @@ def prepare_edit_labels(graph_batch: List[MolGraph], edits: List[Any], edit_atom
         edit_label = torch.from_numpy(edit_label)  # Explanation: computes an intermediate value for molecular graph editing
         edit_labels.append(edit_label)  # Explanation: executes this statement as part of collate molecular graphs and edit labels into tensors
 
+    profile_log(
+        "KGCL_PROFILE_GRAPH_BUILD",
+        "prepare_edit_labels time",
+        ms=f"{elapsed_ms(profile_timer):.3f}",
+        graphs=len(graph_batch),
+    )
     return edit_labels  # Explanation: returns this computed result to the caller
 
 
@@ -124,6 +132,7 @@ def get_batch_graphs(
     """
     Featurization of a batch of molecules.
     """
+    profile_timer = profile_start("KGCL_PROFILE_GRAPH_BUILD")
     # Start n_atoms and n_bonds at 1 b/c zero padding
     n_atoms = 1  # number of atoms (start at 1 b/c need index 0 as padding)  # Explanation: assigns an intermediate value used by later computation
     n_bonds = 1  # number of bonds (start at 1 b/c need index 0 as padding)  # Explanation: assigns an intermediate value used by later computation
@@ -322,5 +331,14 @@ def get_batch_graphs(
         graph_tensors = (f_atoms, f_bonds, f_fgs, atom_num, n_mols, a2b, b2a, b2revb, undirected_b2a)  # Explanation: computes an intermediate value for molecular graph editing
     scopes = (a_scope, b_scope)  # Explanation: assigns an intermediate value used by later computation
 
+    profile_log(
+        "KGCL_PROFILE_GRAPH_BUILD",
+        "get_batch_graphs time",
+        ms=f"{elapsed_ms(profile_timer):.3f}",
+        graphs=len(graph_batch),
+        atoms=int(n_atoms) - 1,
+        directed_bonds=int(n_bonds) - 1,
+        fg_mode=fg_mode,
+    )
     return graph_tensors, scopes  # Explanation: returns this computed result to the caller
     

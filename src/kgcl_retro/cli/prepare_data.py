@@ -66,6 +66,10 @@ def prepare_data(args: Any) -> None:  # Explanation: defines prepare_data, which
 
     batch_graphs = []  # Explanation: assigns an intermediate value used by later computation
     batch_num = 0  # Explanation: assigns an intermediate value used by later computation
+    fg_mode = getattr(args, 'fg_mode', 'legacy')
+    if fg_mode == "contextual_fg":
+        fg_mode = "contextual"
+    fg_metadata_cache = {} if fg_mode == "contextual" and os.environ.get("KGCL_CONTEXTUAL_FG_CACHE") == "1" else None
 
     if args.use_rxn_class:  # Explanation: checks this condition to choose the next execution path
         savedir = os.path.join(mode_dir, 'with_rxn_class')  # Explanation: builds the reaction-class-conditioned tensor output directory.
@@ -103,7 +107,8 @@ def prepare_data(args: Any) -> None:  # Explanation: defines prepare_data, which
                     fg_mode=getattr(args, 'fg_mode', 'legacy'),
                     fg_context_radius=getattr(args, 'fg_context_radius', 1),
                     fg_max_matches_per_pattern=getattr(args, 'fg_max_matches_per_pattern', None),
-                    fg_max_dist=getattr(args, 'fg_max_dist', 8))  # Explanation: assigns an intermediate value used by later computation
+                    fg_max_dist=getattr(args, 'fg_max_dist', 8),
+                    fg_metadata_cache=fg_metadata_cache)  # Explanation: assigns an intermediate value used by later computation
                 graph_seq.append(graph)  # Explanation: executes this statement as part of prepare graph-edit training tensors
                 edit_exe = Termination(action_vocab='Terminate')  # Explanation: computes an intermediate value for molecular graph editing
                 try:  # Explanation: starts a protected block for operations that may fail
@@ -117,7 +122,8 @@ def prepare_data(args: Any) -> None:  # Explanation: defines prepare_data, which
                                  fg_mode=getattr(args, 'fg_mode', 'legacy'),
                                  fg_context_radius=getattr(args, 'fg_context_radius', 1),
                                  fg_max_matches_per_pattern=getattr(args, 'fg_max_matches_per_pattern', None),
-                                 fg_max_dist=getattr(args, 'fg_max_dist', 8))  # Explanation: computes an intermediate value for molecular graph editing
+                                 fg_max_dist=getattr(args, 'fg_max_dist', 8),
+                                 fg_metadata_cache=fg_metadata_cache)  # Explanation: computes an intermediate value for molecular graph editing
                 graph_seq.append(graph)  # Explanation: executes this statement as part of prepare graph-edit training tensors
                 int_mol = apply_edit_to_mol(  # Explanation: assigns an intermediate value used by later computation
                     Chem.Mol(int_mol), edit, rxn_data.edits_atom[i])  # Explanation: executes this statement as part of prepare graph-edit training tensors

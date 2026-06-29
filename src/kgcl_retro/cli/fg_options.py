@@ -5,6 +5,8 @@ import os
 from argparse import ArgumentParser
 from typing import Any
 
+from kgcl_retro.chemistry.functional_groups import get_functional_group_asset_fingerprint
+
 
 FG_CONFIG_KEYS = (
     "fg_mode",
@@ -24,8 +26,8 @@ FG_CONFIG_KEYS = (
     "fg_debug",
 )
 
-ARCHITECTURE_FG_KEYS = tuple(key for key in FG_CONFIG_KEYS if key not in {"fg_debug", "fg_freeze_kg_embeddings"})
-ARCHITECTURE_KEYS = (
+ARCHITECTURE_FG_KEYS = tuple(key for key in FG_CONFIG_KEYS if key != "fg_debug")
+_PREPARED_DATA_KEYS = (
     "fg_mode",
     "fg_context_radius",
     "fg_hidden_size",
@@ -39,21 +41,19 @@ ARCHITECTURE_KEYS = (
     "fg_use_distance_bias",
     "fg_null_token",
     "fg_freeze_kg_projection",
+    "fg_freeze_kg_embeddings",
     "use_rxn_class",
-    "atom_message",
-    "n_atom_feat",
-    "n_bond_feat",
-    "mpn_size",
-    "depth",
-)
-_PREPARED_DATA_KEYS = (
-    "fg_mode",
-    "fg_context_radius",
-    "fg_max_dist",
-    "fg_max_matches_per_pattern",
-    "use_rxn_class",
+    "atom_fdim",
+    "bond_fdim",
+    "kg_asset_metadata",
 )
 _VALID_FG_MODES = {"legacy", "contextual", "none"}
+_PREPARED_DATA_MISMATCH_MESSAGE = (
+    "Prepared data FG metadata does not match requested contextual FG architecture. "
+    "Re-run kgcl-prepare-data with matching --fg_mode and FG options."
+)
+_BASE_ATOM_FDIM_FALLBACK = 85
+_BOND_FDIM_FALLBACK = 12
 
 
 def _as_dict(args: Any) -> dict[str, Any]:
@@ -110,8 +110,6 @@ def _fill_checkpoint_comparison_defaults(config: dict[str, Any]) -> dict[str, An
     filled.setdefault("fg_null_token", True)
     filled.setdefault("fg_freeze_kg_projection", False)
     filled.setdefault("fg_freeze_kg_embeddings", filled["fg_freeze_kg_projection"])
-    filled.setdefault("use_rxn_class", False)
-    filled.setdefault("atom_message", False)
     if filled.get("fg_hidden_size") is None and filled.get("mpn_size") is not None:
         filled["fg_hidden_size"] = filled["mpn_size"]
     if filled.get("fg_attn_dim") is None and filled.get("mpn_size") is not None:
@@ -154,6 +152,49 @@ def fg_config_from_args(args: dict[str, Any]) -> dict[str, Any]:
     return normalize_fg_config_values({key: args.get(key) for key in FG_CONFIG_KEYS if key in args})
 
 
+def _kg_asset_metadata(use_rxn_class: bool) -> dict[str, Any]:
+    embedding_set = "KGembedding_2" if use_rxn_class else "KGembedding"
+    return get_functional_group_asset_fingerprint(embedding_set)
+
+
+def _feature_metadata(use_rxn_class: bool) -> dict[str, int]:
+    try:
+        from kgcl_retro.chemistry.features import ATOM_FDIM, BOND_FDIM
+    except Exception:
+        return {
+            "atom_fdim": _BASE_ATOM_FDIM_FALLBACK + (10 if use_rxn_class else 0),
+            "bond_fdim": _BOND_FDIM_FALLBACK,
+        }
+    return {
+        "atom_fdim": ATOM_FDIM + (10 if use_rxn_class else 0),
+        "bond_fdim": BOND_FDIM,
+    }
+
+
+def _fill_prepared_metadata_defaults(metadata: dict[str, Any]) -> dict[str, Any]:
+    filled = dict(metadata)
+    filled.setdefault("fg_mode", "legacy")
+    filled.setdefault("fg_context_radius", 1)
+    filled.setdefault("fg_hidden_size", None)
+    filled.setdefault("fg_layers", 2)
+    filled.setdefault("fg_dropout", None)
+    filled.setdefault("fg_attn_dim", None)
+    filled.setdefault("fg_max_dist", 8)
+    filled.setdefault("fg_max_matches_per_pattern", None)
+    for key, default in (
+        ("fg_use_kg_fusion", True),
+        ("fg_use_membership_bias", True),
+        ("fg_use_distance_bias", True),
+        ("fg_null_token", True),
+        ("fg_freeze_kg_projection", False),
+        ("fg_freeze_kg_embeddings", False),
+        ("fg_debug", False),
+    ):
+        if filled.get(key) is None:
+            filled[key] = default
+    return normalize_fg_config_values(filled)
+
+
 def processed_fg_subdir(args: Any) -> str:
     args_dict = _as_dict(args)
     fg_mode = _canonical_fg_mode(args_dict.get("fg_mode", "legacy"))
@@ -167,9 +208,12 @@ def processed_fg_subdir(args: Any) -> str:
 
 def metadata_for_args(args: Any) -> dict[str, Any]:
     args = _as_dict(args)
-    metadata = fg_config_from_args(args)
+    metadata = _fill_prepared_metadata_defaults(fg_config_from_args(args))
     metadata["fg_mode"] = _canonical_fg_mode(metadata.get("fg_mode", "legacy"))
-    metadata["use_rxn_class"] = bool(args.get("use_rxn_class", False))
+    use_rxn_class = bool(args.get("use_rxn_class", False))
+    metadata["use_rxn_class"] = use_rxn_class
+    metadata.update(_feature_metadata(use_rxn_class))
+    metadata["kg_asset_metadata"] = _kg_asset_metadata(use_rxn_class)
     return metadata
 
 
@@ -186,25 +230,37 @@ def assert_prepared_data_compatible(config: dict[str, Any], metadata: dict[str, 
         return
     if metadata is None:
         raise ValueError(
-            "Prepared data has no fg_metadata. Regenerate it with kgcl-prepare-data "
-            "using the same --fg_mode settings."
+            "Prepared data has no fg_metadata. "
+            f"{_PREPARED_DATA_MISMATCH_MESSAGE}"
         )
     found = normalize_fg_config_values(dict(metadata))
     found["fg_mode"] = _canonical_fg_mode(found.get("fg_mode", "legacy"))
 
     defaults = {
         "fg_context_radius": 1,
+        "fg_hidden_size": None,
+        "fg_layers": 2,
+        "fg_dropout": None,
+        "fg_attn_dim": None,
         "fg_max_dist": 8,
         "fg_max_matches_per_pattern": None,
+        "fg_use_kg_fusion": True,
+        "fg_use_membership_bias": True,
+        "fg_use_distance_bias": True,
+        "fg_null_token": True,
+        "fg_freeze_kg_projection": False,
+        "fg_freeze_kg_embeddings": False,
         "use_rxn_class": False,
     }
     for key in _PREPARED_DATA_KEYS:
+        if key not in found:
+            raise ValueError(f"{_PREPARED_DATA_MISMATCH_MESSAGE} Missing key: {key}.")
         expected_value = expected.get(key, defaults.get(key))
         found_value = found.get(key, defaults.get(key))
         if expected_value != found_value:
             raise ValueError(
-                f"Prepared data mismatch for {key}: expected {expected_value!r}, "
-                f"found {found_value!r}. Regenerate prepared data for this FG configuration."
+                f"{_PREPARED_DATA_MISMATCH_MESSAGE} Mismatch for {key}: "
+                f"expected {expected_value!r}, found {found_value!r}."
             )
 
 
@@ -228,15 +284,12 @@ def resolve_eval_fg_config(checkpoint_config: dict[str, Any], args: Any) -> dict
     args_dict = _as_dict(args)
     cli_config = {key: args_dict.get(key) for key in FG_CONFIG_KEYS if args_dict.get(key) is not None}
     cli_config = normalize_fg_config_values(cli_config)
-    for key in ARCHITECTURE_KEYS:
-        if key not in FG_CONFIG_KEYS and args_dict.get(key) is not None:
-            cli_config[key] = args_dict[key]
     allow_override = bool(args_dict.get("allow_architecture_override", False))
 
     for key, value in cli_config.items():
         if key == "fg_freeze_kg_embeddings":
             continue
-        if key not in ARCHITECTURE_KEYS:
+        if key not in ARCHITECTURE_FG_KEYS:
             resolved[key] = value
             continue
         checkpoint_value = resolved.get(key)
