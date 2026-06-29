@@ -107,7 +107,10 @@ Common contextual options:
 Prepared batches for `contextual` and `none` modes are written into
 mode-specific subdirectories, such as `contextual_fg_r1/`, and include
 `fg_metadata.json`. Training checks this metadata so legacy and contextual
-tensors are not mixed silently.
+tensors are not mixed silently. Contextual metadata records the FG option set,
+atom/bond feature dimensions, reaction-class setting, and a fingerprint of the
+KG asset table. If those settings do not match, re-run `kgcl-prepare-data` with
+the same FG options used for training.
 
 Evaluation loads the FG architecture saved in the checkpoint by default.
 Passing FG architecture flags during eval acts as a compatibility check.
@@ -117,6 +120,38 @@ intentionally.
 This implementation adds the Contextual Functional-Group KGCL stage only.
 Sparse 2-FWL, PairWL, candidate nonbonded pair scoring, and bond-edit action
 space expansion are not implemented here.
+
+## Contextual FG Diagnostics
+
+Graph preparation is quiet by default. For local profiling, set:
+
+```bash
+KGCL_PROFILE_GRAPH_BUILD=1
+KGCL_PROFILE_CONTEXTUAL_FG=1
+```
+
+These print MolGraph build time, contextual FG matching/BFS timing, batch graph
+collation timing, edit-label timing, FG instance counts, and average context
+size. Contextual FG metadata caching can be enabled during data preparation
+with:
+
+```bash
+KGCL_CONTEXTUAL_FG_CACHE=1 kgcl-prepare-data --dataset uspto_50k --mode train --fg_mode contextual
+```
+
+The cache key includes atom-map-sensitive molecule identity, reaction-class
+setting, FG context settings, and the KG asset fingerprint. It caches only
+graph-local FG metadata, not batch-offset tensors.
+
+Run a lightweight local benchmark without USPTO data:
+
+```bash
+python -m kgcl_retro.benchmarks.contextual_fg_prepare --fg_mode contextual --use_cache
+```
+
+Dense one-hot edit labels remain the default for checkpoint compatibility. An
+index-label target format can be added later as an experimental path once it is
+benchmarked against the current dense training loop.
 
 ## Model Options
 

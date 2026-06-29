@@ -1,8 +1,10 @@
-from typing import Any, List, Tuple  # Explanation: imports selected names needed to represent reaction graphs and inject functional-group knowledge
+import copy
+from typing import Any, MutableMapping, List, Tuple  # Explanation: imports selected names needed to represent reaction graphs and inject functional-group knowledge
 from rdkit import Chem  # Explanation: imports selected names needed to represent reaction graphs and inject functional-group knowledge
 from kgcl_retro.chemistry.features import get_atom_features, get_bond_features  # Explanation: imports packaged atom and bond featurizers for graph construction.
-from kgcl_retro.chemistry.functional_groups import load_functional_group_resources  # Explanation: imports the package-resource loader for KG functional-group embeddings.
+from kgcl_retro.chemistry.functional_groups import get_functional_group_asset_fingerprint, load_functional_group_resources  # Explanation: imports the package-resource loader for KG functional-group embeddings.
 from kgcl_retro.chemistry.fg_instances import compute_fg_chem_descriptors, match_fg_instances  # Explanation: imports contextual functional-group occurrence matching.
+from kgcl_retro.profiling import elapsed_ms, log as profile_log, start as profile_start
 import torch  # Explanation: imports torch for represent reaction graphs and inject functional-group knowledge
 import torch.nn.functional as F  # Explanation: imports torch.nn.functional as F for represent reaction graphs and inject functional-group knowledge
 import math  # Explanation: imports math for represent reaction graphs and inject functional-group knowledge
@@ -58,6 +60,7 @@ class MolGraph:  # Explanation: defines MolGraph, single molecule graph with fea
         fg_context_radius: int = 1,
         fg_max_matches_per_pattern: int | None = None,
         fg_max_dist: int = 8,
+        fg_metadata_cache: MutableMapping[Any, dict[str, Any]] | None = None,
     ) -> None:  # Explanation: defines __init__, which represent reaction graphs and inject functional-group knowledge
         """
         Parameters
@@ -76,10 +79,20 @@ class MolGraph:  # Explanation: defines MolGraph, single molecule graph with fea
         self.fg_context_radius = fg_context_radius
         self.fg_max_matches_per_pattern = fg_max_matches_per_pattern
         self.fg_max_dist = fg_max_dist
+        self.fg_metadata_cache = fg_metadata_cache
         if self.fg_mode not in {"legacy", "contextual", "none"}:
             raise ValueError(f"Unsupported fg_mode: {self.fg_mode}")
+        graph_build_start = profile_start("KGCL_PROFILE_GRAPH_BUILD")
         self._build_mol()  # Explanation: uses or updates this object state during computation
         self._build_graph()  # Explanation: uses or updates this object state during computation
+        profile_log(
+            "KGCL_PROFILE_GRAPH_BUILD",
+            "MolGraph build time",
+            ms=f"{elapsed_ms(graph_build_start):.3f}",
+            atoms=self.n_atoms,
+            bonds=self.num_bonds,
+            fg_mode=self.fg_mode,
+        )
 
     def _build_mol(self) -> None:  # Explanation: defines _build_mol, which represent reaction graphs and inject functional-group knowledge
         """Builds the molecule attributes."""
@@ -131,27 +144,122 @@ class MolGraph:  # Explanation: defines MolGraph, single molecule graph with fea
                     queue.append(neighbor_idx)
         return distances
 
+    def _stable_mol_cache_key(self) -> tuple[Any, ...]:
+        atom_rows = tuple(
+            (
+                atom.GetIdx(),
+                atom.GetAtomMapNum(),
+                atom.GetAtomicNum(),
+                atom.GetFormalCharge(),
+                atom.GetIsotope(),
+                int(atom.GetIsAromatic()),
+                int(atom.GetChiralTag()),
+                atom.GetNumExplicitHs(),
+                atom.GetNumImplicitHs(),
+            )
+            for atom in self.mol.GetAtoms()
+        )
+        bond_rows = tuple(
+            (
+                bond.GetIdx(),
+                bond.GetBeginAtomIdx(),
+                bond.GetEndAtomIdx(),
+                str(bond.GetBondType()),
+                str(bond.GetStereo()),
+                int(bond.GetIsAromatic()),
+                int(bond.GetIsConjugated()),
+            )
+            for bond in sorted(self.mol.GetBonds(), key=lambda item: item.GetIdx())
+        )
+        smiles = Chem.MolToSmiles(self.mol, canonical=False, isomericSmiles=True)
+        return smiles, atom_rows, bond_rows
+
+    def _fg_asset_hash(self) -> tuple[Any, ...]:
+        embedding_set = "KGembedding_2" if self.use_rxn_class else "KGembedding"
+        fingerprint = get_functional_group_asset_fingerprint(embedding_set)
+        return tuple(sorted(fingerprint.items()))
+
+    def _contextual_fg_cache_key(self) -> tuple[Any, ...]:
+        return (
+            self._stable_mol_cache_key(),
+            self.use_rxn_class,
+            self.fg_mode,
+            self.fg_context_radius,
+            self.fg_max_dist,
+            self.fg_max_matches_per_pattern,
+            self._fg_asset_hash(),
+        )
+
+    def _contextual_fg_cache_payload(self) -> dict[str, Any]:
+        return {
+            "fg_instances": self.fg_instances,
+            "f_fgs": self.f_fgs,
+            "fg_names": self.fg_names,
+            "fg_context_atom_indices": self.fg_context_atom_indices,
+            "fg_context_edges": self.fg_context_edges,
+            "fg_core_masks": self.fg_core_masks,
+            "fg_dist_to_core": self.fg_dist_to_core,
+            "fg_kg_embeddings": self.fg_kg_embeddings,
+            "fg_type_ids": self.fg_type_ids,
+            "fg_chem_descriptors": self.fg_chem_descriptors,
+            "atom_to_fg_dist": self.atom_to_fg_dist,
+            "atom_to_fg_membership": self.atom_to_fg_membership,
+        }
+
+    def _load_contextual_fg_cache_payload(self, payload: dict[str, Any]) -> None:
+        for key, value in payload.items():
+            setattr(self, key, copy.deepcopy(value))
+
+    def _iter_bonds_for_directed_graph(self):
+        return sorted(
+            self.mol.GetBonds(),
+            key=lambda bond: (
+                min(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()),
+                max(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()),
+            ),
+        )
+
     def _build_contextual_fg_metadata(self) -> None:
         self._empty_contextual_fg_metadata()
+        cache_key = None
+        if self.fg_metadata_cache is not None:
+            cache_key = self._contextual_fg_cache_key()
+            cached = self.fg_metadata_cache.get(cache_key)
+            if cached is not None:
+                self._load_contextual_fg_cache_payload(cached)
+                profile_log(
+                    "KGCL_PROFILE_CONTEXTUAL_FG",
+                    "FG metadata cache hit",
+                    instances=len(self.fg_instances),
+                )
+                return
+
+        match_start = profile_start("KGCL_PROFILE_CONTEXTUAL_FG")
         self.fg_instances = match_fg_instances(
             self.mol,
             use_rxn_class=self.use_rxn_class,
             max_matches_per_pattern=self.fg_max_matches_per_pattern,
         )
+        match_ms = elapsed_ms(match_start)
         self.f_fgs = [instance.kg_embedding for instance in self.fg_instances]
         self.fg_names = [instance.name for instance in self.fg_instances]
         adjacency = self._adjacency()
         all_atom_fg_dist: list[list[int]] = []
         all_atom_fg_membership: list[list[bool]] = []
+        bfs_ms = 0.0
+        context_atom_counts = []
 
         for instance in self.fg_instances:
             core_atoms = set(instance.core_atoms)
+            bfs_start = profile_start("KGCL_PROFILE_CONTEXTUAL_FG")
             distances = self._distances_to_core(core_atoms, adjacency)
+            bfs_ms += elapsed_ms(bfs_start)
             context_atom_indices = tuple(
                 atom_idx
                 for atom_idx, dist in enumerate(distances)
                 if dist <= self.fg_context_radius
             )
+            context_atom_counts.append(len(context_atom_indices))
             context_atom_set = set(context_atom_indices)
             context_position = {atom_idx: idx for idx, atom_idx in enumerate(context_atom_indices)}
             context_edges = []
@@ -191,6 +299,19 @@ class MolGraph:  # Explanation: defines MolGraph, single molecule graph with fea
         else:
             self.atom_to_fg_dist = [[] for _ in range(self.n_atoms)]
             self.atom_to_fg_membership = [[] for _ in range(self.n_atoms)]
+
+        if self.fg_metadata_cache is not None and cache_key is not None:
+            self.fg_metadata_cache[cache_key] = copy.deepcopy(self._contextual_fg_cache_payload())
+
+        avg_context_atoms = sum(context_atom_counts) / max(len(context_atom_counts), 1)
+        profile_log(
+            "KGCL_PROFILE_CONTEXTUAL_FG",
+            "FG matching time",
+            ms=f"{match_ms:.3f}",
+            bfs_ms=f"{bfs_ms:.3f}",
+            instances=len(self.fg_instances),
+            avg_context_atoms=f"{avg_context_atoms:.3f}",
+        )
 
     def _build_graph(self):  # Explanation: defines _build_graph, which represent reaction graphs and inject functional-group knowledge
         """Builds the graph attributes."""
@@ -234,30 +355,25 @@ class MolGraph:  # Explanation: defines MolGraph, single molecule graph with fea
             self.f_atoms = fuse_f_atoms.tolist()  # Explanation: stores this value on the object for later model operations
 
         # Get bond features
-        for a1 in range(self.n_atoms):  # Explanation: iterates over this collection to process each item
-            for a2 in range(a1 + 1, self.n_atoms):  # Explanation: iterates over this collection to process each item
-                bond = self.mol.GetBondBetweenAtoms(a1, a2)  # Explanation: assigns an intermediate value used by later computation
+        for bond in self._iter_bonds_for_directed_graph():  # Explanation: iterates over existing RDKit bonds without scanning all atom pairs.
+            a1, a2 = sorted([bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()])
+            f_bond = get_bond_features(bond)  # Explanation: assigns an intermediate value used by later computation
 
-                if bond is None:  # Explanation: checks this condition to choose the next execution path
-                    continue  # Explanation: skips the rest of this loop iteration
+            self.f_bonds.append(self.f_atoms[a1] + f_bond)  # Explanation: uses or updates this object state during computation
+            self.f_bonds.append(self.f_atoms[a2] + f_bond)  # Explanation: uses or updates this object state during computation
+            self.f_bond_attrs.append(f_bond)
+            self.f_bond_attrs.append(f_bond)
 
-                f_bond = get_bond_features(bond)  # Explanation: assigns an intermediate value used by later computation
-
-                self.f_bonds.append(self.f_atoms[a1] + f_bond)  # Explanation: uses or updates this object state during computation
-                self.f_bonds.append(self.f_atoms[a2] + f_bond)  # Explanation: uses or updates this object state during computation
-                self.f_bond_attrs.append(f_bond)
-                self.f_bond_attrs.append(f_bond)
-
-                # Update index mappings
-                b1 = self.n_bonds  # Explanation: assigns an intermediate value used by later computation
-                b2 = b1 + 1  # Explanation: assigns an intermediate value used by later computation
-                self.a2b[a2].append(b1)  # b1 = a1 --> a2  # Explanation: stores this value on the object for later model operations
-                self.b2a.append(a1)  # Explanation: uses or updates this object state during computation
-                self.a2b[a1].append(b2)  # b2 = a2 --> a1  # Explanation: stores this value on the object for later model operations
-                self.b2a.append(a2)  # Explanation: uses or updates this object state during computation
-                self.b2revb.append(b2)  # Explanation: uses or updates this object state during computation
-                self.b2revb.append(b1)  # Explanation: uses or updates this object state during computation
-                self.n_bonds += 2  # Explanation: stores this value on the object for later model operations
+            # Update index mappings
+            b1 = self.n_bonds  # Explanation: assigns an intermediate value used by later computation
+            b2 = b1 + 1  # Explanation: assigns an intermediate value used by later computation
+            self.a2b[a2].append(b1)  # b1 = a1 --> a2  # Explanation: stores this value on the object for later model operations
+            self.b2a.append(a1)  # Explanation: uses or updates this object state during computation
+            self.a2b[a1].append(b2)  # b2 = a2 --> a1  # Explanation: stores this value on the object for later model operations
+            self.b2a.append(a2)  # Explanation: uses or updates this object state during computation
+            self.b2revb.append(b2)  # Explanation: uses or updates this object state during computation
+            self.b2revb.append(b1)  # Explanation: uses or updates this object state during computation
+            self.n_bonds += 2  # Explanation: stores this value on the object for later model operations
 
 class RxnGraph:  # Explanation: defines RxnGraph, reaction state containing a product graph and edit label
     """
@@ -276,6 +392,7 @@ class RxnGraph:  # Explanation: defines RxnGraph, reaction state containing a pr
         fg_context_radius: int = 1,
         fg_max_matches_per_pattern: int | None = None,
         fg_max_dist: int = 8,
+        fg_metadata_cache: MutableMapping[Any, dict[str, Any]] | None = None,
     ) -> None:  # Explanation: computes an intermediate value for molecular graph editing
         """
         Parameters
@@ -301,6 +418,7 @@ class RxnGraph:  # Explanation: defines RxnGraph, reaction state containing a pr
             fg_context_radius=fg_context_radius,
             fg_max_matches_per_pattern=fg_max_matches_per_pattern,
             fg_max_dist=fg_max_dist,
+            fg_metadata_cache=fg_metadata_cache,
         )  # Explanation: assigns an intermediate value used by later computation
         if reac_mol is not None:  # Explanation: checks this condition to choose the next execution path
             self.reac_mol = reac_mol  # Explanation: stores this value on the object for later model operations

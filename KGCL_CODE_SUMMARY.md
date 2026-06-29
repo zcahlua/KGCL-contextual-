@@ -570,3 +570,19 @@ more information, usually easier, but requires a class label
 reaction-class-unknown mode:
 less information, usually harder, but more realistic when only the target product is known
 ```
+
+## Contextual FG Hardening Notes
+
+Contextual FG mode changes only the functional-group representation. It keeps
+the original atom, existing-bond, and stop edit heads; it does not add sparse
+2-FWL, PairWL, nonbonded pair scoring, or Add Bond action expansion.
+
+Graph construction now iterates over existing RDKit bonds instead of scanning
+all atom pairs, while preserving the legacy directed-bond tensor order. Edit
+labels and beam-search decoding remain aligned to RDKit bond indices.
+
+Prepared contextual data records the FG option set, reaction-class setting,
+feature dimensions, and KG asset fingerprint in `fg_metadata.json`. Profiling is
+available through `KGCL_PROFILE_GRAPH_BUILD=1` and
+`KGCL_PROFILE_CONTEXTUAL_FG=1`; contextual FG metadata caching during
+preparation is enabled with `KGCL_CONTEXTUAL_FG_CACHE=1`.

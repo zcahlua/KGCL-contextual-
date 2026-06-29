@@ -2,6 +2,7 @@ from __future__ import annotations  # Explanation: defers annotation evaluation 
 
 from dataclasses import dataclass  # Explanation: imports dataclass for the immutable resource container.
 from functools import lru_cache  # Explanation: imports lru_cache so asset files are loaded once per embedding set.
+import hashlib
 from importlib import resources  # Explanation: imports package-resource helpers for installed asset files.
 import pickle  # Explanation: imports pickle to load the saved functional-group embedding dictionary.
 from typing import Any  # Explanation: imports Any for RDKit and embedding objects whose concrete types come from external packages.
@@ -50,6 +51,20 @@ def get_functional_group_asset_metadata(embedding_set: str = "KGembedding") -> t
         embeddings = pickle.load(handle)
     first_embedding = next(iter(embeddings.values()))
     return len(names), len(first_embedding), names
+
+
+@lru_cache(maxsize=2)
+def get_functional_group_asset_fingerprint(embedding_set: str = "KGembedding") -> dict[str, Any]:
+    root = _asset_root(embedding_set)
+    funcgroup_bytes = root.joinpath("funcgroup.txt").read_bytes()
+    fg2emb_bytes = root.joinpath("fg2emb.pkl").read_bytes()
+    names = [line.split()[0] for line in funcgroup_bytes.decode("utf-8").strip().splitlines()]
+    return {
+        "embedding_set": embedding_set,
+        "num_fg_types": len(names),
+        "funcgroup_sha256": hashlib.sha256(funcgroup_bytes).hexdigest(),
+        "fg2emb_sha256": hashlib.sha256(fg2emb_bytes).hexdigest(),
+    }
 
 
 def match_fg_instances(mol: Any, use_rxn_class: bool, max_matches_per_pattern: int | None = None):
